@@ -42,6 +42,7 @@ var (
 	apiInternalAPI  bool
 	apiProposerAPI  bool
 	apiLogTag       string
+	bundleMergerURL string
 )
 
 func init() {
@@ -68,6 +69,7 @@ func init() {
 	apiCmd.Flags().BoolVar(&apiDataAPI, "data-api", apiDefaultDataAPIEnabled, "enable data API (/data/...)")
 	apiCmd.Flags().BoolVar(&apiInternalAPI, "internal-api", apiDefaultInternalAPIEnabled, "enable internal API (/internal/...)")
 	apiCmd.Flags().BoolVar(&apiProposerAPI, "proposer-api", apiDefaultProposerAPIEnabled, "enable proposer API (/proposer/...)")
+	apiCmd.Flags().StringVar(&bundleMergerURL, "bundle-merger-url", "", "URL of the bundle-merger gRPC service")
 }
 
 var apiCmd = &cobra.Command{
@@ -170,6 +172,7 @@ var apiCmd = &cobra.Command{
 			InternalAPI:     apiInternalAPI,
 			ProposerAPI:     apiProposerAPI,
 			PprofAPI:        apiPprofEnabled,
+			BundleMergerURL: bundleMergerURL,
 		}
 
 		// Decode the private key

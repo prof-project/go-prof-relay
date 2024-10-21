@@ -7,6 +7,7 @@ require (
 	github.com/alicebob/miniredis/v2 v2.32.1
 	github.com/attestantio/go-builder-client v0.4.3-0.20240124194555-d44db06f45fa
 	github.com/attestantio/go-eth2-client v0.21.1
+	github.com/bloXroute-Labs/relay-grpc v0.0.39-0.20241004203849-1d53808f6ea3
 	github.com/bradfitz/gomemcache v0.0.0-20230124162541-5f7a7d875746
 	github.com/btcsuite/btcd/btcutil v1.1.2
 	github.com/buger/jsonparser v1.1.1
@@ -14,6 +15,7 @@ require (
 	github.com/flashbots/go-boost-utils v1.8.0
 	github.com/flashbots/go-utils v0.5.0
 	github.com/go-redis/redis/v9 v9.0.0-rc.1
+	github.com/google/uuid v1.3.1
 	github.com/gorilla/mux v1.8.1
 	github.com/holiman/uint256 v1.2.4
 	github.com/jmoiron/sqlx v1.3.5
@@ -33,6 +35,7 @@ require (
 	go.uber.org/atomic v1.11.0
 	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa
 	golang.org/x/text v0.14.0
+	google.golang.org/grpc v1.57.0
 )
 
 require (
@@ -61,8 +64,8 @@ require (
 	github.com/goccy/go-yaml v1.11.2 // indirect
 	github.com/gofrs/flock v0.8.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
+	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/golang/snappy v0.0.5-0.20220116011046-fa5810519dcb // indirect
-	github.com/google/uuid v1.3.1 // indirect
 	github.com/klauspost/compress v1.15.15 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
@@ -82,6 +85,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.25.0 // indirect
 	golang.org/x/sync v0.5.0 // indirect
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20230530153820-e85fd2cbaebc // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 	rsc.io/tmplfunc v0.0.3 // indirect
 )

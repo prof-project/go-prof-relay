@@ -23,7 +23,9 @@ import (
 	builderApi "github.com/attestantio/go-builder-client/api"
 	builderApiV1 "github.com/attestantio/go-builder-client/api/v1"
 	"github.com/attestantio/go-eth2-client/spec"
+	consensus "github.com/attestantio/go-eth2-client/spec/deneb"
 	"github.com/attestantio/go-eth2-client/spec/phase0"
+	relay_grpc "github.com/bloXroute-Labs/relay-grpc" // Import the generated gRPC code
 	"github.com/buger/jsonparser"
 	"github.com/flashbots/go-boost-utils/bls"
 	"github.com/flashbots/go-boost-utils/ssz"
@@ -36,6 +38,7 @@ import (
 	"github.com/flashbots/mev-boost-relay/datastore"
 	"github.com/flashbots/mev-boost-relay/metrics"
 	"github.com/go-redis/redis/v9"
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/holiman/uint256"
 	"github.com/pkg/errors"
@@ -45,6 +48,8 @@ import (
 	otelapi "go.opentelemetry.io/otel/metric"
 	uberatomic "go.uber.org/atomic"
 	"golang.org/x/exp/slices"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -138,6 +143,8 @@ type RelayAPIOpts struct {
 	DataAPI         bool
 	PprofAPI        bool
 	InternalAPI     bool
+
+	BundleMergerURL string
 }
 
 type payloadAttributesHelper struct {
@@ -229,6 +236,9 @@ type RelayAPI struct {
 	optimisticBlocksWG sync.WaitGroup
 	// Cache for builder statuses and collaterals.
 	blockBuildersCache map[string]*blockBuilderCacheEntry
+
+	bmClient relay_grpc.EnricherClient
+	bmConn   *grpc.ClientConn
 }
 
 // NewRelayAPI creates a new service. if builders is nil, allow any builder
@@ -281,6 +291,12 @@ func NewRelayAPI(opts RelayAPIOpts) (api *RelayAPI, err error) {
 		}
 	}
 
+	// Initialize the bundle-merger client
+	conn, err := grpc.Dial(opts.BundleMergerURL, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to bundle-merger: %w", err)
+	}
+
 	api = &RelayAPI{
 		opts:         opts,
 		log:          opts.Log,
@@ -299,6 +315,9 @@ func NewRelayAPI(opts RelayAPIOpts) (api *RelayAPI, err error) {
 
 		validatorRegC:     make(chan builderApiV1.SignedValidatorRegistration, 450_000),
 		validatorUpdateCh: make(chan struct{}),
+
+		bmClient: relay_grpc.NewEnricherClient(conn),
+		bmConn:   conn,
 	}
 
 	if os.Getenv("FORCE_GET_HEADER_204") == "1" {
@@ -1261,12 +1280,94 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	getPayloadResp, err := api.datastore.GetGetPayloadResponse(log, slot, proposerPubkeyHex, blockHash.String())
+	if err != nil || getPayloadResp == nil {
+		log.WithFields(logrus.Fields{
+			"value":     value.String(),
+			"blockHash": blockHash.String(),
+		}).Info("bid delivered, failed to get the best block for PROF augmentation")
+		api.RespondOK(w, bid)
+		return
+	}
+
+	bidTrace, err := api.redis.GetBidTrace(uint64(slot), proposerPubkeyHex, blockHash.String())
+	if err != nil {
+		log.WithError(err).Info("failed to get bidTrace for delivered payload from redis")
+		return
+	}
+
+	if getPayloadResp.Deneb == nil {
+		// skip prof bundle augmentation
+		log.WithFields(logrus.Fields{
+			"value": value.String(),
+			"slot":  slot,
+		}).Info("bid delivered, no deneb payload found")
+		api.RespondOK(w, bid)
+		return
+	}
+
+	start := time.Now()
+
+	// Attempt to augment the winning block with the PROF bundle
+	enrichedHeader, err := api.enrichBidWithPROF(getPayloadResp, bidTrace.BidTrace)
+	if err != nil {
+		log.WithError(err).Error("failed to enrich bid with PROF")
+		api.RespondError(w, http.StatusInternalServerError, "failed to enrich bid with PROF")
+		return
+	}
+
+	enrichTime := time.Since(start)
+	log.WithField("enrichedHeader", enrichedHeader).Info("SUCCESS: bid enriched with PROF")
+	log.WithField("enrichTime", enrichTime).Info("TIME: bid enriched with PROF")
+	// TODO - recalculate enriched bid
+
 	log.WithFields(logrus.Fields{
 		"value":     value.String(),
 		"blockHash": blockHash.String(),
 	}).Info("bid delivered")
 
 	api.RespondOK(w, bid)
+}
+
+// Implement the enrichBidWithPROF method
+func (api *RelayAPI) enrichBidWithPROF(pbsPayload *builderApi.VersionedSubmitBlindedBlockResponse, bidTrace builderApiV1.BidTrace) (consensus.ExecutionPayloadHeader, error) {
+
+	// Prepare EnrichBlockRequest
+	uuidStr := uuid.New().String()
+	executionPayloadAndBlobsBundle := relay_grpc.ExecutionPayloadToProtoExecutionPayloadAndBlobsBundle(pbsPayload.Deneb)
+	if executionPayloadAndBlobsBundle == nil {
+		return consensus.ExecutionPayloadHeader{}, fmt.Errorf("failed to convert execution payload")
+	}
+
+	api.payloadAttributesLock.RLock()
+	attrs := api.payloadAttributes[pbsPayload.Deneb.ExecutionPayload.ParentHash.String()]
+	api.payloadAttributesLock.RUnlock()
+
+	enrichRequest := relay_grpc.ExecutionPayloadToProtoEnrichBlockRequest(uuidStr, pbsPayload.Deneb, bidTrace, *attrs.parentBeaconRoot)
+
+	// Call the bundle-merger via gRPC
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stream, err := api.bmClient.EnrichBlockStream(ctx)
+	if err != nil {
+		return consensus.ExecutionPayloadHeader{}, fmt.Errorf("failed to create enrich block stream: %w", err)
+	}
+
+	if err := stream.Send(&enrichRequest); err != nil {
+		return consensus.ExecutionPayloadHeader{}, fmt.Errorf("failed to send enrich block request: %w", err)
+	}
+
+	response, err := stream.Recv()
+	if err != nil {
+		return consensus.ExecutionPayloadHeader{}, fmt.Errorf("failed to receive enrich block response: %w", err)
+	}
+
+	_, enrichedHeader, _, value := relay_grpc.ProtoEnrichBlockResponseToExecutionPayloadHeader(response)
+
+	api.log.WithField("value", value.String()).Info("bid enriched with PROF")
+
+	return enrichedHeader, nil
 }
 
 func (api *RelayAPI) checkProposerSignature(block *common.VersionedSignedBlindedBeaconBlock, pubKey []byte) (bool, error) {
