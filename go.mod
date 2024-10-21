@@ -10,8 +10,8 @@ require (
 	github.com/bradfitz/gomemcache v0.0.0-20230124162541-5f7a7d875746
 	github.com/btcsuite/btcd/btcutil v1.1.2
 	github.com/buger/jsonparser v1.1.1
-	github.com/ethereum/go-ethereum v1.13.10
-	github.com/flashbots/go-boost-utils v1.8.0
+	github.com/ethereum/go-ethereum v1.13.14
+	github.com/flashbots/go-boost-utils v1.8.1
 	github.com/flashbots/go-utils v0.5.0
 	github.com/go-redis/redis/v9 v9.0.0-rc.1
 	github.com/gorilla/mux v1.8.1
@@ -38,7 +38,6 @@ require (
 require (
 	github.com/DataDog/zstd v1.5.2 // indirect
 	github.com/StackExchange/wmi v1.2.1 // indirect
-	github.com/VictoriaMetrics/fastcache v1.12.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.10.0 // indirect
 	github.com/cockroachdb/errors v1.9.1 // indirect
@@ -57,7 +56,7 @@ require (
 	github.com/go-gorp/gorp/v3 v3.1.0 // indirect
 	github.com/go-logr/logr v1.4.1 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/go-ole/go-ole v1.2.5 // indirect
+	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/goccy/go-yaml v1.11.2 // indirect
 	github.com/gofrs/flock v0.8.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
