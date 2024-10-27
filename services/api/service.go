@@ -1260,6 +1260,7 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 
 	if bid == nil || bid.IsEmpty() {
 		w.WriteHeader(http.StatusNoContent)
+		log.WithError(err).Error("bid was empty, skipping PROF augmentation")
 		return
 	}
 
