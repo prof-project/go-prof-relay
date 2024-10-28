@@ -771,6 +771,8 @@ func (api *RelayAPI) processPayloadAttributes(payloadAttributes beaconclient.Pay
 	api.payloadAttributesLock.Lock()
 	defer api.payloadAttributesLock.Unlock()
 
+	api.log.Infof("payload attributes received for slot: %d", payloadAttrSlot)
+
 	// Step 1: clean up old ones
 	for parentBlockHash, attr := range api.payloadAttributes {
 		if attr.slot < apiHeadSlot {
@@ -1341,8 +1343,25 @@ func (api *RelayAPI) enrichBidWithPROF(pbsPayload *builderApi.VersionedSubmitBli
 	}
 
 	api.payloadAttributesLock.RLock()
-	attrs := api.payloadAttributes[pbsPayload.Deneb.ExecutionPayload.ParentHash.String()]
+	attrs, ok := api.payloadAttributes[getPayloadAttributesKey(bidTrace.ParentHash.String(), bidTrace.Slot)]
 	api.payloadAttributesLock.RUnlock()
+
+	if !ok || bidTrace.Slot != attrs.slot {
+		api.log.WithFields(logrus.Fields{
+			"attributesFound": ok,
+			"payloadSlot":     bidTrace.Slot,
+			"attrsSlot":       attrs.slot,
+		}).Warn("payload attributes not known")
+		return consensus.ExecutionPayloadHeader{}, fmt.Errorf("failed to fetch the attributes: %w", ok)
+	}
+
+	// Add null check for attrs
+	if attrs.parentBeaconRoot == nil {
+		api.log.Infof("attrs dump: %+v", attrs) 
+		return consensus.ExecutionPayloadHeader{}, fmt.Errorf("parent beacon root not found in payload attributes")
+	}
+
+	api.log.Info("parent beacon root found in payload attributes")
 
 	enrichRequest := relay_grpc.ExecutionPayloadToProtoEnrichBlockRequest(uuidStr, pbsPayload.Deneb, bidTrace, *attrs.parentBeaconRoot)
 
