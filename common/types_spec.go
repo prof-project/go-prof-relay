@@ -3,6 +3,7 @@ package common
 import (
 	"encoding/json"
 	"fmt"
+	"encoding/hex"
 
 	builderApi "github.com/attestantio/go-builder-client/api"
 	builderApiCapella "github.com/attestantio/go-builder-client/api/capella"
@@ -21,6 +22,7 @@ import (
 	"github.com/flashbots/go-boost-utils/utils"
 	"github.com/holiman/uint256"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -104,21 +106,58 @@ func BuildGetPayloadResponse(payload *VersionedSubmitBlockRequest) (*builderApi.
 }
 
 func BuilderBlockRequestToSignedBuilderBid(payload *VersionedSubmitBlockRequest, header *builderApi.VersionedExecutionPayloadHeader, sk *bls.SecretKey, pubkey *phase0.BLSPubKey, domain phase0.Domain) (*builderSpec.VersionedSignedBuilderBid, error) {
+	log := logrus.WithFields(logrus.Fields{
+		"method": "BuilderBlockRequestToSignedBuilderBid",
+		"payload_nil": payload == nil,
+		"header_nil": header == nil,
+		"sk_nil": sk == nil,
+		"pubkey_nil": pubkey == nil,
+	})
+
+	if payload == nil {
+		log.Error("payload is nil")
+		return nil, ErrMissingRequest
+	}
+
+	if sk == nil {
+		log.Error("secret key is nil")
+		return nil, ErrMissingSecretKey
+	}
+
+	log = log.WithFields(logrus.Fields{
+		"payload_version": payload.Version,
+		"header_version": header.Version,
+	})
+
 	value, err := payload.Value()
 	if err != nil {
+		log.WithError(err).Error("failed to get payload value")
 		return nil, err
 	}
 
+	log = log.WithField("value", value.String())
+
 	switch payload.Version { //nolint:exhaustive
 	case spec.DataVersionCapella:
+		if header.Capella == nil {
+			log.Error("header.Capella is nil")
+			return nil, errors.New("header.Capella is nil")
+		}
 		builderBid := builderApiCapella.BuilderBid{
 			Value:  value,
 			Header: header.Capella,
 			Pubkey: *pubkey,
 		}
 
+		log.WithFields(logrus.Fields{
+			"builder_bid_value": builderBid.Value.String(),
+			"builder_bid_pubkey": builderBid.Pubkey.String(),
+			"header_state_root": "0x" + hex.EncodeToString(header.Capella.StateRoot[:]),
+		}).Debug("created Capella builder bid")
+
 		sig, err := ssz.SignMessage(&builderBid, domain, sk)
 		if err != nil {
+			log.WithError(err).Error("failed to sign Capella builder bid")
 			return nil, err
 		}
 
@@ -129,7 +168,21 @@ func BuilderBlockRequestToSignedBuilderBid(payload *VersionedSubmitBlockRequest,
 				Signature: sig,
 			},
 		}, nil
+
 	case spec.DataVersionDeneb:
+		if header.Deneb == nil {
+			log.Error("header.Deneb is nil")
+			return nil, errors.New("header.Deneb is nil")
+		}
+		if payload.Deneb == nil {
+			log.Error("payload.Deneb is nil")
+			return nil, errors.New("payload.Deneb is nil")
+		}
+		if payload.Deneb.BlobsBundle == nil {
+			log.Error("payload.Deneb.BlobsBundle is nil")
+			return nil, errors.New("payload.Deneb.BlobsBundle is nil")
+		}
+
 		builderBid := builderApiDeneb.BuilderBid{
 			Header:             header.Deneb,
 			BlobKZGCommitments: payload.Deneb.BlobsBundle.Commitments,
@@ -137,8 +190,16 @@ func BuilderBlockRequestToSignedBuilderBid(payload *VersionedSubmitBlockRequest,
 			Pubkey:             *pubkey,
 		}
 
+		log.WithFields(logrus.Fields{
+			"builder_bid_value": builderBid.Value.String(),
+			"builder_bid_pubkey": builderBid.Pubkey.String(),
+			"header_state_root": "0x" + hex.EncodeToString(header.Deneb.StateRoot[:]),
+			"num_commitments": len(builderBid.BlobKZGCommitments),
+		}).Debug("created Deneb builder bid")
+
 		sig, err := ssz.SignMessage(&builderBid, domain, sk)
 		if err != nil {
+			log.WithError(err).Error("failed to sign Deneb builder bid")
 			return nil, err
 		}
 
@@ -149,7 +210,9 @@ func BuilderBlockRequestToSignedBuilderBid(payload *VersionedSubmitBlockRequest,
 				Signature: sig,
 			},
 		}, nil
+
 	default:
+		log.Error("unsupported version")
 		return nil, errors.Wrap(ErrInvalidVersion, fmt.Sprintf("%s is not supported", payload.Version))
 	}
 }

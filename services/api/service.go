@@ -20,8 +20,12 @@ import (
 	"time"
 
 	"github.com/NYTimes/gziphandler"
+
 	builderApi "github.com/attestantio/go-builder-client/api"
+	builderApiDeneb "github.com/attestantio/go-builder-client/api/deneb"
 	builderApiV1 "github.com/attestantio/go-builder-client/api/v1"
+	builderSpec "github.com/attestantio/go-builder-client/spec"
+	apiv1deneb "github.com/attestantio/go-eth2-client/api/v1/deneb"
 	"github.com/attestantio/go-eth2-client/spec"
 	consensus "github.com/attestantio/go-eth2-client/spec/deneb"
 	"github.com/attestantio/go-eth2-client/spec/phase0"
@@ -1312,7 +1316,7 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	start := time.Now()
 
 	// Attempt to augment the winning block with the PROF bundle
-	enrichedHeader, err := api.enrichBidWithPROF(getPayloadResp, bidTrace.BidTrace)
+	enrichedHeader, enrichedValue, err := api.enrichBidWithPROF(getPayloadResp, bidTrace.BidTrace)
 	if err != nil {
 		log.WithError(err).Error("failed to enrich bid with PROF")
 		api.RespondError(w, http.StatusInternalServerError, "failed to enrich bid with PROF")
@@ -1322,24 +1326,69 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	enrichTime := time.Since(start)
 	log.WithField("enrichedHeader", enrichedHeader).Info("SUCCESS: bid enriched with PROF")
 	log.WithField("enrichTime", enrichTime).Info("TIME: bid enriched with PROF")
-	// TODO - recalculate enriched bid
+	log.WithField("bid", value).Info("Original Bid")
+	log.WithField("enrichedBid", enrichedValue).Info("Enriched Bid")
 
-	log.WithFields(logrus.Fields{
-		"value":     value.String(),
-		"blockHash": blockHash.String(),
-	}).Info("bid delivered")
+	// Update the bid's value and header based on version
+	switch bid.Version {
+	case spec.DataVersionDeneb:
+		// Create a new payload request with the enriched header
+		newPayload := &common.VersionedSubmitBlockRequest{
+			VersionedSubmitBlockRequest: builderSpec.VersionedSubmitBlockRequest{
+				Version: spec.DataVersionDeneb,
+				Deneb: &builderApiDeneb.SubmitBlockRequest{
+					BlobsBundle: getPayloadResp.Deneb.BlobsBundle,
+					Message: &builderApiV1.BidTrace{
+						Slot:                 bidTrace.Slot,
+						ParentHash:           bidTrace.ParentHash,
+						BlockHash:            enrichedHeader.BlockHash,
+						BuilderPubkey:        bidTrace.BuilderPubkey,
+						ProposerPubkey:       bidTrace.ProposerPubkey,
+						ProposerFeeRecipient: bidTrace.ProposerFeeRecipient,
+						GasLimit:             bidTrace.GasLimit,
+						GasUsed:              enrichedHeader.GasUsed,
+						Value:                enrichedValue,
+					},
+				},
+			},
+		}
 
-	api.RespondOK(w, bid)
+		// Add defensive check before signing
+		// if api.isDeneb(slot) && enrichedHeader.BlobsBundle == nil {
+		// 	log.Error("enriched payload missing required BlobsBundle for Deneb block")
+		// 	api.RespondError(w, http.StatusInternalServerError, "invalid Deneb payload structure")
+		// 	return
+		// }
+
+		versionedHeader := &builderApi.VersionedExecutionPayloadHeader{
+			Version: spec.DataVersionDeneb,
+			Deneb:   &enrichedHeader,
+		}
+		signedBid, err := common.BuilderBlockRequestToSignedBuilderBid(newPayload, versionedHeader, api.blsSk, api.publicKey, api.opts.EthNetDetails.DomainBuilder)
+		if err != nil {
+			log.WithError(err).Error("could not sign enriched builder bid")
+			api.RespondError(w, http.StatusInternalServerError, "failed to sign enriched bid")
+			return
+		}
+
+		// Return the newly signed bid
+		api.RespondOK(w, signedBid)
+
+	default:
+		log.Error("unsupported bid version")
+		api.RespondError(w, http.StatusInternalServerError, "unsupported bid version")
+		return
+	}
 }
 
 // Implement the enrichBidWithPROF method
-func (api *RelayAPI) enrichBidWithPROF(pbsPayload *builderApi.VersionedSubmitBlindedBlockResponse, bidTrace builderApiV1.BidTrace) (consensus.ExecutionPayloadHeader, error) {
+func (api *RelayAPI) enrichBidWithPROF(pbsPayload *builderApi.VersionedSubmitBlindedBlockResponse, bidTrace builderApiV1.BidTrace) (consensus.ExecutionPayloadHeader, *uint256.Int, error) {
 
 	// Prepare EnrichBlockRequest
 	uuidStr := uuid.New().String()
 	executionPayloadAndBlobsBundle := relay_grpc.ExecutionPayloadToProtoExecutionPayloadAndBlobsBundle(pbsPayload.Deneb)
 	if executionPayloadAndBlobsBundle == nil {
-		return consensus.ExecutionPayloadHeader{}, fmt.Errorf("failed to convert execution payload")
+		return consensus.ExecutionPayloadHeader{}, nil, fmt.Errorf("failed to convert execution payload")
 	}
 
 	api.payloadAttributesLock.RLock()
@@ -1352,13 +1401,13 @@ func (api *RelayAPI) enrichBidWithPROF(pbsPayload *builderApi.VersionedSubmitBli
 			"payloadSlot":     bidTrace.Slot,
 			"attrsSlot":       attrs.slot,
 		}).Warn("payload attributes not known")
-		return consensus.ExecutionPayloadHeader{}, fmt.Errorf("failed to fetch the attributes: %w", ok)
+		return consensus.ExecutionPayloadHeader{}, nil, fmt.Errorf("failed to fetch the attributes: %w", ok)
 	}
 
 	// Add null check for attrs
 	if attrs.parentBeaconRoot == nil {
-		api.log.Infof("attrs dump: %+v", attrs) 
-		return consensus.ExecutionPayloadHeader{}, fmt.Errorf("parent beacon root not found in payload attributes")
+		api.log.Infof("attrs dump: %+v", attrs)
+		return consensus.ExecutionPayloadHeader{}, nil, fmt.Errorf("parent beacon root not found in payload attributes")
 	}
 
 	api.log.Info("parent beacon root found in payload attributes")
@@ -1371,23 +1420,26 @@ func (api *RelayAPI) enrichBidWithPROF(pbsPayload *builderApi.VersionedSubmitBli
 
 	stream, err := api.bmClient.EnrichBlockStream(ctx)
 	if err != nil {
-		return consensus.ExecutionPayloadHeader{}, fmt.Errorf("failed to create enrich block stream: %w", err)
+		return consensus.ExecutionPayloadHeader{}, nil, fmt.Errorf("failed to create enrich block stream: %w", err)
 	}
 
 	if err := stream.Send(&enrichRequest); err != nil {
-		return consensus.ExecutionPayloadHeader{}, fmt.Errorf("failed to send enrich block request: %w", err)
+		return consensus.ExecutionPayloadHeader{}, nil, fmt.Errorf("failed to send enrich block request: %w", err)
 	}
 
 	response, err := stream.Recv()
 	if err != nil {
-		return consensus.ExecutionPayloadHeader{}, fmt.Errorf("failed to receive enrich block response: %w", err)
+		return consensus.ExecutionPayloadHeader{}, nil, fmt.Errorf("failed to receive enrich block response: %w", err)
 	}
+
+	api.log.Info("enrich block response received / response", response)
 
 	_, enrichedHeader, _, value := relay_grpc.ProtoEnrichBlockResponseToExecutionPayloadHeader(response)
 
 	api.log.WithField("value", value.String()).Info("bid enriched with PROF")
 
-	return enrichedHeader, nil
+	// Return a pointer to the value instead of the value itself
+	return enrichedHeader, &value, nil
 }
 
 func (api *RelayAPI) checkProposerSignature(block *common.VersionedSignedBlindedBeaconBlock, pubKey []byte) (bool, error) {
@@ -1399,6 +1451,47 @@ func (api *RelayAPI) checkProposerSignature(block *common.VersionedSignedBlinded
 	default:
 		return false, errors.New("unsupported consensus data version")
 	}
+}
+
+func (api *RelayAPI) getPayloadFromProf(signedBlindedBeaconBlock *common.VersionedSignedBlindedBeaconBlock) (*builderApi.VersionedSubmitBlindedBlockResponse, error) {
+
+	fmt.Printf("getPayloadFromProf called!!!\n")
+	// Convert the signed blinded beacon block to the appropriate Deneb version
+	var signedBlindedBeaconBlockDeneb *apiv1deneb.SignedBlindedBeaconBlock
+	switch signedBlindedBeaconBlock.Version {
+	case spec.DataVersionDeneb:
+		signedBlindedBeaconBlockDeneb = signedBlindedBeaconBlock.Deneb
+	default:
+		return nil, fmt.Errorf("unsupported consensus data version to get from bundle merger")
+	}
+
+	// Create the gRPC request to get the enriched payload from the bundle merger
+	enrichedPayloadRequest := relay_grpc.SignedBeaconBlockToProtoGetEnrichedPayloadRequest(signedBlindedBeaconBlockDeneb)
+
+	// Call the bundle merger via gRPC
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	enrichedPayloadResponse, err := api.bmClient.GetEnrichedPayload(ctx, enrichedPayloadRequest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get enriched payload from bundle merger: %w", err)
+	}
+
+	// Use ProtoGetEnrichedPayloadResponseToExecutionPayload to get the enriched ExecutionPayloadAndBlobsBundle
+	enrichedPayload := relay_grpc.ProtoGetEnrichedPayloadResponseToExecutionPayload(enrichedPayloadResponse)
+	if enrichedPayload == nil {
+		return nil, fmt.Errorf("failed to convert enriched payload response from bundle merger")
+	}
+
+	// Create the getPayload response
+	getPayloadResponse := &builderApi.VersionedSubmitBlindedBlockResponse{
+		Version: spec.DataVersionDeneb,
+		Deneb:   enrichedPayload,
+	}
+
+	fmt.Printf("getPayloadResponse returning payload from bundle merger: %+v\n", getPayloadResponse)
+
+	return getPayloadResponse, nil
 }
 
 func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) {
@@ -1420,7 +1513,7 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 	})
 
 	// Log at start and end of request
-	log.Info("request initiated")
+	log.Info("request initiated --> handleGetPayload")
 	defer func() {
 		log.WithFields(logrus.Fields{
 			"timestampRequestFin": time.Now().UTC().UnixMilli(),
@@ -1677,6 +1770,29 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 		log.WithError(err).Error("redis.CheckAndSetLastSlotAndHashDelivered failed")
+	}
+
+	fmt.Printf("Calling the getPayloadFromProf with getPayloadResp: %+v\n", getPayloadResp)
+
+	// Instead of fetching the payload from Redis or datastore, get it from the bundle merger
+	getPayloadRespPROF, err := api.getPayloadFromProf(payload)
+	if err != nil || getPayloadRespPROF == nil {
+		log.WithError(err).Warn("failed to get payload from bundle merger")
+		api.RespondError(w, http.StatusBadRequest, "failed to get execution payload from bundle merger")
+		return
+	}
+
+	log = log.WithField("GOT the payload from bundle merger", getPayloadRespPROF)
+
+	// Now we have the enriched payload
+	log = log.WithField("timestampAfterLoadResponse", time.Now().UTC().UnixMilli())
+
+	// Check that BlindedBlockContent fields (sent by the proposer) match our known BlockContents
+	err = EqBlindedBlockContentsToBlockContents(payload, getPayloadRespPROF)
+	if err != nil {
+		log.WithError(err).Warn("ExecutionPayloadHeader not matching known ExecutionPayload")
+		api.RespondError(w, http.StatusBadRequest, "invalid execution payload header")
+		return
 	}
 
 	// Handle early/late requests
